@@ -143,14 +143,14 @@ inline fn fmtOptions(specifier: Specifier, ap: *VaList) Number {
         '0'
     else
         ' ';
-    
+
     return .{
         .mode = mode,
         .case = case,
         .precision = precision,
         .width = width,
         .alignment = alignment,
-        .fill = fill, 
+        .fill = fill,
     };
 }
 
@@ -288,4 +288,3 @@ const CountingWriter = @import("CountingWriter.zig");
 const token = @import("token.zig");
 pub const Parser = @import("Parser.zig");
 const Specifier = token.Specifier;
-const Token = token.Token;

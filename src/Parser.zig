@@ -42,7 +42,7 @@ pub fn next(self: *Parser) Error!?Token {
     };
 }
 
-const Error = error {
+const Error = error{
     InvalidFormat,
 };
 
