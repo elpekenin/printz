@@ -1,9 +1,12 @@
+// TODO:
+//   * different types based on specifier.length
+//   * is float == f32?
+
 pub export fn printf(format: [*c]const u8, ...) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
 
     var stdout: File.Writer = .init(.stdout(), &.{});
-
     return impl(&stdout.interface, format, &ap);
 }
 
@@ -70,6 +73,87 @@ pub export fn vsnprintf(buffer: [*c]u8, len: usize, format: [*c]const u8, ap: *V
 // private
 //
 
+inline fn fmtOptions(specifier: Specifier, ap: *VaList) Number {
+    const mode: Number.Mode = switch (specifier.type) {
+        .d,
+        .i,
+        .u,
+        .f,
+        .F,
+        .g,
+        .G,
+        => .decimal,
+
+        .e,
+        .E,
+        => .scientific,
+
+        .o,
+        => .octal,
+
+        .x,
+        .X,
+        .a,
+        .A,
+        => .hex,
+
+        else => unreachable,
+    };
+
+    const case: Case = switch (specifier.type) {
+        .d,
+        .i,
+        .o,
+        .u,
+        .x,
+        .e,
+        .f,
+        .g,
+        .a,
+        => .lower,
+
+        .X,
+        .E,
+        .F,
+        .G,
+        .A,
+        => .upper,
+
+        else => unreachable,
+    };
+
+    const precision: ?usize = switch (specifier.precision) {
+        .none => null,
+        .arg => @intCast(@cVaArg(ap, c_int)),
+        .number => |val| val,
+    };
+
+    const width: ?usize = switch (specifier.width) {
+        .none => null,
+        .arg => @intCast(@cVaArg(ap, c_int)),
+        .number => |val| val,
+    };
+
+    const alignment: Alignment = if (specifier.flags.minus)
+        .left
+    else
+        .right;
+
+    const fill: u8 = if (!specifier.flags.minus and specifier.flags.zero)
+        '0'
+    else
+        ' ';
+    
+    return .{
+        .mode = mode,
+        .case = case,
+        .precision = precision,
+        .width = width,
+        .alignment = alignment,
+        .fill = fill, 
+    };
+}
+
 fn impl(writer: *Writer, format: [*c]const u8, ap: *VaList) callconv(.c) c_int {
     return implInner(writer, format, ap) catch -1;
 }
@@ -82,88 +166,105 @@ inline fn implInner(writer: *Writer, format: [*c]const u8, ap: *VaList) !c_int {
     var counting: CountingWriter = .init(writer);
     var w = counting.writer();
 
-    while (try parser.next()) |token| {
-        const argument = switch (token) {
-            .argument => |argument| argument,
+    while (try parser.next()) |tok| {
+        const specifier = switch (tok) {
+            .specifier => |specifier| specifier,
             .text => |text| {
                 _ = try w.write(text);
                 continue;
             },
         };
 
-        switch (argument.specifier) {
-            .char => {
-                const value = @cVaArg(ap, c_char);
-                try w.writeByte(@intCast(value));
+        // handle non-number specifiers already
+        switch (specifier.type) {
+            .c => {
+                const c = @cVaArg(ap, u8);
+                try w.writeByte(c);
+                continue;
             },
-            .number => |number| {
-                // TODO: alignment and fill
-
-                const precision: ?usize = if (argument.options.precision) |precision|
-                    switch (precision) {
-                        .fixed => |val| val,
-                        .arg => @intCast(@cVaArg(ap, c_int)),
-                    }
-                else
-                    null;
-
-                const width: ?usize = if (argument.options.width) |width|
-                    switch (width) {
-                        .fixed => |val| val,
-                        .arg => @intCast(@cVaArg(ap, c_int)),
-                    }
-                else
-                    null;
-
-                switch (number.type) {
-                    .float => {
-                        const value = @cVaArg(ap, f32); // FIXME: f64
-                        try w.printFloat(value, .{
-                            .mode = number.fmt.mode,
-                            .case = number.fmt.case,
-                            .precision = precision,
-                            .width = width,
-                        });
-                    },
-                    .integer => |signedness| {
-                        const base: u8 = switch (number.fmt.mode) {
-                            .decimal => 10,
-                            .binary => unreachable,
-                            .octal => 8,
-                            .hex => 16,
-                            .scientific => unreachable,
-                        };
-
-                        const case = number.fmt.case;
-                        const options: std.fmt.Options = .{
-                            .precision = precision,
-                            .width = width,
-                        };
-
-                        switch (signedness) {
-                            .signed => {
-                                const value = @cVaArg(ap, c_int);
-                                try w.printInt(value, base, case, options);
-                            },
-                            .unsigned => {
-                                const value = @cVaArg(ap, c_uint);
-                                try w.printInt(value, base, case, options);
-                            },
-                        }
-                    },
-                }
+            .s => {
+                const s = @cVaArg(ap, [*c]const u8);
+                try w.print("{s}", .{s});
+                continue;
             },
-            .pointer => {
-                const value = @cVaArg(ap, *void);
-                try w.printAddress(value);
+            .p => {
+                const p = @cVaArg(ap, *void);
+                const i = @intFromPtr(p);
+                _ = try w.write("0x");
+                try w.printInt(i, 16, .lower, .{});
+                continue;
             },
-            .string => {
-                const value = @cVaArg(ap, [*c]u8);
-                _ = try w.print("{s}", .{value}); // is this OK?
+            .n => {
+                const n = @cVaArg(ap, *c_int);
+                try w.flush();
+                n.* = @intCast(counting.count);
+                continue;
             },
-            .percent => {
+            .@"%" => {
                 try w.writeByte('%');
+                continue;
             },
+            else => {},
+        }
+
+        const opts = fmtOptions(specifier, ap);
+
+        switch (specifier.type) {
+            .d,
+            .i,
+            => {
+                const base = opts.mode.base() orelse unreachable;
+
+                const value = @cVaArg(ap, c_int);
+                try w.printInt(value, base, opts.case, .{
+                    .precision = opts.precision,
+                    .width = opts.width,
+                    .alignment = opts.alignment,
+                    .fill = opts.fill,
+                });
+            },
+
+            .o,
+            .u,
+            .x,
+            .X,
+            => {
+                const base = opts.mode.base() orelse unreachable;
+
+                if (specifier.flags.hash) {
+                    switch (specifier.type) {
+                        .o => try w.writeByte('0'),
+                        .x => _ = try w.write("0x"),
+                        .X => _ = try w.write("0X"),
+                        else => {},
+                    }
+                }
+
+                const value = @cVaArg(ap, c_uint);
+                try w.printInt(value, base, opts.case, .{
+                    .precision = opts.precision,
+                    .width = opts.width,
+                    .alignment = opts.alignment,
+                    .fill = opts.fill,
+                });
+            },
+
+            .e,
+            .E,
+            .f,
+            .F,
+            .a,
+            .A,
+            => {
+                const value = @cVaArg(ap, f32);
+                try w.printFloat(value, opts);
+            },
+
+            .g,
+            .G,
+            => @panic("NotImplementedError"),
+
+            else => unreachable,
         }
     }
 
@@ -174,13 +275,17 @@ inline fn implInner(writer: *Writer, format: [*c]const u8, ap: *VaList) !c_int {
 
 const std = @import("std");
 const fd_t = std.c.fd_t;
+const Alignment = std.fmt.Alignment;
 const CWriter = std.io.CWriter;
+const Case = std.fmt.Case;
 const FILE = std.c.FILE;
 const File = std.fs.File;
+const Number = std.fmt.Number;
 const VaList = std.builtin.VaList;
 const Writer = std.io.Writer;
 
-pub const Argument = @import("Argument.zig");
 const CountingWriter = @import("CountingWriter.zig");
-pub const Token = @import("token.zig").Token;
+const token = @import("token.zig");
 pub const Parser = @import("Parser.zig");
+const Specifier = token.Specifier;
+const Token = token.Token;

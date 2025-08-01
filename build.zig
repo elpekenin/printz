@@ -41,10 +41,11 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    // testing
+    // TODO: write tests
     const test_suite = b.addTest(.{
         .root_module = mod,
     });
+    test_suite.linkLibC();
     const run_tests = b.addRunArtifact(test_suite);
     const test_step = b.step("test", "run unit tests");
     test_step.dependOn(&run_tests.step);
